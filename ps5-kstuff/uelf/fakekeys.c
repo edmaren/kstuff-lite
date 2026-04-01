@@ -10,6 +10,13 @@ extern struct
     char key_data[63][32];
 } shared_area;
 
+int has_fake_key(int key_id)
+{
+    if(key_id < 0 || key_id >= 63)
+        return 0;
+    return !!(__atomic_load_n(&shared_area.ready_mask, __ATOMIC_ACQUIRE) & (1ull << key_id));
+}
+
 int register_fake_key(const char key_data[32])
 {
     uint64_t mask, mask1;

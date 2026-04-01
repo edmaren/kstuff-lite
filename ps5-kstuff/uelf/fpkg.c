@@ -27,6 +27,19 @@ struct crypto_message_result
     int total_messages;
 };
 
+enum crypto_message_kind
+{
+    CRYPTO_MESSAGE_OTHER,
+    CRYPTO_MESSAGE_HMAC,
+    CRYPTO_MESSAGE_XTS,
+};
+
+struct crypto_message_info
+{
+    enum crypto_message_kind kind;
+    int key_idx;
+};
+
 static struct crypto_request_cache s_crypto_request_cache;
 
 static int crypto_request_emulated(uint64_t* regs, uint64_t msg, uint32_t status)
@@ -59,64 +72,85 @@ static int is_xts_message(const uint64_t msg_data[21])
     return (msg_data[0] & 0x7ffff7ff) == 0x2108000;
 }
 
-static struct crypto_message_result handle_non_xts_message(uint64_t msg, const uint64_t msg_data[21],
-                                                           uint64_t bytes_cap, uint64_t* bytes_handled,
-                                                           struct crypto_request_cache* cache)
+static struct crypto_message_result unhandled_crypto_message(uint64_t msg)
 {
-    struct crypto_message_result result = {
+    return (struct crypto_message_result){
         .emulated_messages = 0,
         .next_msg = kpeek64(msg + 320),
         .status = ENOSYS,
         .total_messages = 1,
     };
+}
 
-    if((msg_data[0] & 0x7fffffff) == 0x9132000) // SHA256HMAC with key handle
+static struct crypto_message_info inspect_crypto_message(const uint64_t msg_data[21])
+{
+    if(is_xts_message(msg_data))
     {
-        int idx = HANDLE_TO_IDX(msg_data[20]);
-        if(idx < 0)
-            return result;
-        uint8_t key[32];
-        if(!get_fake_key(idx, key))
-            return result;
-        if(msg_data[3] != msg_data[1] * 8)
-            return result;
-        uint8_t hash[32] = {0};
-        *bytes_handled += msg_data[1];
-        if(bytes_cap < *bytes_handled && pfs_hmac_virtual_fpu_held(cache, hash, idx, key, msg_data[2], msg_data[1]))
+        int key_idx = HANDLE_TO_IDX(msg_data[5]);
+        if(key_idx >= 0 && has_fake_key(key_idx))
         {
-            result.emulated_messages = 1;
-            result.status = -1;
-            return result;
+            struct crypto_message_info info = {
+                .kind = CRYPTO_MESSAGE_XTS,
+                .key_idx = key_idx,
+            };
+            return info;
         }
-        if(copy_to_kernel(msg+32, hash, 32))
+    }
+    if(is_hmac_message(msg_data))
+    {
+        int key_idx = HANDLE_TO_IDX(msg_data[20]);
+        if(key_idx >= 0 && msg_data[3] == msg_data[1] * 8 && has_fake_key(key_idx))
         {
-            result.emulated_messages = 1;
-            result.status = -1;
-            return result;
+            struct crypto_message_info info = {
+                .kind = CRYPTO_MESSAGE_HMAC,
+                .key_idx = key_idx,
+            };
+            return info;
         }
+    }
+    return (struct crypto_message_info){
+        .kind = CRYPTO_MESSAGE_OTHER,
+        .key_idx = -1,
+    };
+}
+
+static struct crypto_message_result handle_hmac_message(uint64_t msg, const uint64_t msg_data[21],
+                                                        int key_idx, uint64_t bytes_cap,
+                                                        uint64_t* bytes_handled,
+                                                        struct crypto_request_cache* cache)
+{
+    struct crypto_message_result result = unhandled_crypto_message(msg);
+    uint8_t key[32];
+    if(!get_fake_key(key_idx, key))
+        return result;
+
+    uint8_t hash[32] = {0};
+    *bytes_handled += msg_data[1];
+    if(bytes_cap < *bytes_handled && pfs_hmac_virtual_fpu_held(cache, hash, key_idx, key, msg_data[2], msg_data[1]))
+    {
         result.emulated_messages = 1;
-        result.status = 0;
+        result.status = -1;
         return result;
     }
+    if(copy_to_kernel(msg+32, hash, 32))
+    {
+        result.emulated_messages = 1;
+        result.status = -1;
+        return result;
+    }
+    result.emulated_messages = 1;
+    result.status = 0;
     return result;
 }
 
 static struct crypto_message_result handle_xts_message_run(uint64_t msg, const uint64_t first_msg_data[21],
+                                                           int key_idx,
                                                            uint64_t bytes_cap, uint64_t* bytes_handled,
                                                            struct crypto_request_cache* cache)
 {
-    struct crypto_message_result result = {
-        .emulated_messages = 0,
-        .next_msg = kpeek64(msg + 320),
-        .status = ENOSYS,
-        .total_messages = 1,
-    };
-    int idx = HANDLE_TO_IDX(first_msg_data[5]);
-    if(idx < 0)
-        return result;
-
+    struct crypto_message_result result = unhandled_crypto_message(msg);
     uint8_t key[32];
-    if(!get_fake_key(idx, key))
+    if(!get_fake_key(key_idx, key))
         return result;
 
     uint64_t src = first_msg_data[2];
@@ -134,7 +168,7 @@ static struct crypto_message_result handle_xts_message_run(uint64_t msg, const u
         if(!is_xts_message(next_msg_data))
             break;
         uint32_t next_sectors = (uint32_t)next_msg_data[1];
-        if(HANDLE_TO_IDX(next_msg_data[5]) != idx
+        if(HANDLE_TO_IDX(next_msg_data[5]) != key_idx
         || ((next_msg_data[0] & 0x800) >> 11) != is_encrypt
         || next_msg_data[2] != src + ((uint64_t)total_sectors << 12)
         || next_msg_data[3] != dst + ((uint64_t)total_sectors << 12)
@@ -160,7 +194,7 @@ static struct crypto_message_result handle_xts_message_run(uint64_t msg, const u
     if(skip_sectors < total_sectors)
     {
         if(pfs_xts_virtual_fpu_held(cache, dst + ((uint64_t)skip_sectors << 12),
-                                    src + ((uint64_t)skip_sectors << 12), idx, key,
+                                    src + ((uint64_t)skip_sectors << 12), key_idx, key,
                                     start_sector + skip_sectors, total_sectors - skip_sectors, is_encrypt))
         {
             result.emulated_messages = result.total_messages;
@@ -174,25 +208,26 @@ static struct crypto_message_result handle_xts_message_run(uint64_t msg, const u
     return result;
 }
 
+/*
 static inline uint64_t rdtsc(void)
 {
     uint32_t a, d;
     asm volatile("rdtsc":"=a"(a),"=d"(d));
     return (uint64_t)d << 32 | a;
 }
+*/
 
 static int handle_crypto_request(uint64_t* regs, uint64_t bytes_handled)
 {
-    uint64_t start_time = rdtsc();
+    // uint64_t start_time = rdtsc();
     int total = 0;
     int emulated = 0;
     int total_status = 0;
     int handled = 0;
+    int fpu_entered = 0;
     uint64_t new_bytes_handled = 0;
 
     uint64_t start = (FWVER >= 0x800) ? regs[RBX] : regs[R14];
-    if(uelf_fpu_enter())
-        return 0;
 
     for (uint64_t msg = start; msg && !total_status;)
     {
@@ -203,9 +238,21 @@ static int handle_crypto_request(uint64_t* regs, uint64_t bytes_handled)
             break;
         }
 
-        struct crypto_message_result result = is_xts_message(msg_data)
-            ? handle_xts_message_run(msg, msg_data, bytes_handled, &new_bytes_handled, &s_crypto_request_cache)
-            : handle_non_xts_message(msg, msg_data, bytes_handled, &new_bytes_handled, &s_crypto_request_cache);
+        struct crypto_message_info msg_info = inspect_crypto_message(msg_data);
+        if(!fpu_entered && msg_info.kind != CRYPTO_MESSAGE_OTHER)
+        {
+            if(uelf_fpu_enter())
+                break;
+            fpu_entered = 1;
+        }
+
+        struct crypto_message_result result;
+        if(msg_info.kind == CRYPTO_MESSAGE_XTS)
+            result = handle_xts_message_run(msg, msg_data, msg_info.key_idx, bytes_handled, &new_bytes_handled, &s_crypto_request_cache);
+        else if(msg_info.kind == CRYPTO_MESSAGE_HMAC)
+            result = handle_hmac_message(msg, msg_data, msg_info.key_idx, bytes_handled, &new_bytes_handled, &s_crypto_request_cache);
+        else
+            result = unhandled_crypto_message(msg);
         int status = result.status;
 
         if (status == EINTR) // partial decrypt, need to restart the syscall
@@ -246,15 +293,15 @@ static int handle_crypto_request(uint64_t* regs, uint64_t bytes_handled)
 
         if(!crypto_request_emulated(regs, (FWVER >= 0x800) ? regs[RBX] : regs[R14], total_status))
             goto exit;
-
-        uint64_t end_time = rdtsc();
+        // uint64_t end_time = rdtsc();
         /*log_word(0x1234);
         log_word(end_time - start_time);*/
         handled = 1;
     }
 
 exit:
-    uelf_fpu_exit();
+    if(fpu_entered)
+        uelf_fpu_exit();
     return handled;
 }
 
