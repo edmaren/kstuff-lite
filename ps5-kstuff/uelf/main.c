@@ -41,20 +41,27 @@ extern char mprotect_fix_start[];
 
 void handle_syscall(uint64_t* regs, int allow_kekcall)
 {
-    const uint64_t syscall_extra = (FWVER >= 0x1000 ? 0x10 : 0);
-#define IS_PPR(which) (regs[RAX] == (uint64_t)&sysents[SYS_##which])
+    const uint64_t sysent = regs[RAX];
+#define IS_PPR(which) (sysent == (uint64_t)&sysents[SYS_##which])
 #ifdef FREEBSD
 #define IS_PS4(which) 0
 #else
-#define IS_PS4(which) (regs[RAX] == (uint64_t)&sysents_ps4[SYS_##which])
+#define IS_PS4(which) (sysent == (uint64_t)&sysents_ps4[SYS_##which])
+    if(IS_PPR(ioctl) || IS_PS4(ioctl))
+    {
+        METRIC_INC(syscall_ioctl_dispatches);
+        handle_ioctl_syscall(regs);
+        return;
+    }
 #endif
 #define IS(which) (IS_PPR(which) || IS_PS4(which))
-    if(IS_PPR(getppid) && allow_kekcall)
+    if(allow_kekcall && IS_PPR(getppid))
     {
         METRIC_INC(syscall_kekcall_dispatches);
         enum { KEKCALL_ARGS_OFFSET_MAX = syscall_rsp_to_regs_stash + 0x10 + 8 };
         uint8_t syscall_frame[KEKCALL_ARGS_OFFSET_MAX + sizeof(uint64_t) * NREGS];
         uint64_t args[NREGS] = {0};
+        const uint64_t syscall_extra = (FWVER >= 0x1000 ? 0x10 : 0);
         uint64_t args_offset = syscall_rsp_to_regs_stash + syscall_extra + 8;
         if(copy_from_kernel(syscall_frame, regs[RSP], args_offset + sizeof(args)))
             return;
@@ -69,9 +76,24 @@ void handle_syscall(uint64_t* regs, int allow_kekcall)
             regs[RSP] += 8;
             regs[RIP] = syscall_lr;
         }
+        return;
     }
 #ifndef FREEBSD
-    else if(IS(execve)
+    if(IS(mprotect)
+         || IS_PPR(mdbg_call))
+    {
+        METRIC_INC(syscall_fix_dispatches);
+        handle_syscall_fix(regs);
+        return;
+    }
+    if(IS(nmount)
+         || IS(unmount))
+    {
+        METRIC_INC(syscall_fpkg_dispatches);
+        handle_fpkg_syscall(regs);
+        return;
+    }
+    if(IS(execve)
          || IS(dynlib_load_prx)
          || IS(get_self_auth_info)
          || IS(get_sdk_compiled_version)
@@ -84,24 +106,7 @@ void handle_syscall(uint64_t* regs, int allow_kekcall)
     {
         METRIC_INC(syscall_fself_dispatches);
         handle_fself_syscall(regs);
-    }
-    else if(IS(nmount)
-         || IS(unmount))
-    {
-        METRIC_INC(syscall_fpkg_dispatches);
-        handle_fpkg_syscall(regs);
-    }
-    else if(IS(ioctl)
-         || IS_PPR(ioctl))
-    {
-        METRIC_INC(syscall_ioctl_dispatches);
-        handle_ioctl_syscall(regs);
-    }
-    else if(IS(mprotect)
-         || IS_PPR(mdbg_call))
-    {
-        METRIC_INC(syscall_fix_dispatches);
-        handle_syscall_fix(regs);
+        return;
     }
 #endif
 #undef IS
@@ -268,7 +273,6 @@ void handle(uint64_t* regs)
     const uint64_t rip = regs[RIP];
     if(initial_from_user)
         METRIC_INC(handle_from_userspace_entries);
-    const uint64_t syscall_extra = (FWVER >= 0x1000 ? 0x10 : 0);
     if(!initial_from_user)
         regs[EFLAGS] |= 0x10000; //RF
     if(__builtin_expect(!initial_from_user && !initial_from_copyio, 1)
@@ -339,6 +343,7 @@ from_userspace:
     }
     else if(regs[RIP] == (uint64_t)syscall_before)
     {
+        const uint64_t syscall_extra = (FWVER >= 0x1000 ? 0x10 : 0);
         uint64_t syscall_target;
         regs[RAX] |= 0xffffull << 48;
         regs[RSI] = regs[RSP] + syscall_rsp_to_rsi + syscall_extra;
