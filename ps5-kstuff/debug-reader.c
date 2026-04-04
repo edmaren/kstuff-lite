@@ -6,6 +6,7 @@
 #include <string.h>
 #include <time.h>
 #include <sys/syscall.h>
+#include "../freebsd-headers/sys/ioccom.h"
 #include "uelf/shared_area.h"
 #include "uelf/fself.h"
 #include "uelf/syscall_fixes.h"
@@ -310,8 +311,6 @@ static void print_metrics(const struct kstuff_metrics* metrics)
     tee_printf("copy");
     PRINT_FIELD("v2p", metrics->virt2phys_calls);
     PRINT_FIELD("v2p_fail", metrics->virt2phys_failures);
-    PRINT_FIELD("v2p_local_hit", metrics->virt2phys_local_hits);
-    PRINT_FIELD("v2p_local_miss", metrics->virt2phys_local_misses);
     PRINT_FIELD("in", metrics->copy_from_calls);
     PRINT_FIELD("in_bytes", metrics->copy_from_bytes);
     PRINT_FIELD("in_fail", metrics->copy_from_failures);
@@ -329,6 +328,18 @@ static void print_metrics(const struct kstuff_metrics* metrics)
 #undef PRINT_FIELD
 }
 
+static const char* ioctl_dir_name(uint64_t com)
+{
+    switch(com & IOC_DIRMASK)
+    {
+        case IOC_VOID: return "VOID";
+        case IOC_OUT: return "OUT";
+        case IOC_IN: return "IN";
+        case IOC_INOUT: return "INOUT";
+        default: return "UNKNOWN";
+    }
+}
+
 static void print_ioctl_com_table(const struct kstuff_ioctl_com_table* table, uint64_t total_ioctl)
 {
     int printed = 0;
@@ -342,10 +353,16 @@ static void print_ioctl_com_table(const struct kstuff_ioctl_com_table* table, ui
         const struct kstuff_ioctl_com_entry* entry = &table->entries[i];
         if(!entry->emulated_hits)
             continue;
-        tee_printf("ioctl-com[%zu] syscall_id=%u com=0x%016" PRIx64 " total=%" PRIu64 " emu=%" PRIu64 " cmd5=%" PRIu64 " cmd6=%" PRIu64 " pct=",
+        tee_printf("ioctl-com[%zu] syscall_id=%u com=0x%016" PRIx64
+                   " dir=%s len=%u group=0x%02x num=0x%02x total=%" PRIu64
+                   " emu=%" PRIu64 " cmd5=%" PRIu64 " cmd6=%" PRIu64 " pct=",
                    i,
                    (unsigned)SYS_ioctl,
                    entry->com,
+                   ioctl_dir_name(entry->com),
+                   (unsigned)IOCPARM_LEN(entry->com),
+                   (unsigned)IOCGROUP(entry->com),
+                   (unsigned)(entry->com & 0xff),
                    (uint64_t)entry->total_hits,
                    (uint64_t)entry->emulated_hits,
                    (uint64_t)entry->cmd5_hits,
