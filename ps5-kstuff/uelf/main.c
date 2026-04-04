@@ -28,6 +28,16 @@ extern char tss[];
 extern char int1_handler[];
 extern char int13_handler[];
 extern uint64_t wrmsr_args;
+#ifndef FREEBSD
+extern char sceSblServiceMailbox[];
+extern char sceSblServiceCryptAsync_deref_singleton[];
+extern char sceSblAuthMgrSmIsLoadable2[];
+extern char loadSelfSegment_watchpoint[];
+extern char loadSelfSegment_epilogue[];
+extern char decryptSelfBlock_epilogue[];
+extern char decryptMultipleSelfBlocks_epilogue[];
+extern char mprotect_fix_start[];
+#endif
 
 void handle_syscall(uint64_t* regs, int allow_kekcall)
 {
@@ -99,16 +109,178 @@ void handle_syscall(uint64_t* regs, int allow_kekcall)
 #undef IS_PPR
 }
 
+static inline int handle_generic_decrypt_trap(uint64_t* regs)
+{
+    const uint64_t poisoned_hi = 0xdeb7;
+    const uint64_t restore_hi = 0xffffull << 48;
+#define IS_POISONED(which) ((regs[which] >> 48) == poisoned_hi)
+#define FIX_POISONED(which, field) do { regs[which] |= restore_hi; METRIC_INC(debug_reg_decrypt_events); METRIC_INC(field); } while(0)
+    /*
+     * Telemetry shows that almost every generic decrypt fixup is RSI-only.
+     * The only other registers that show up with non-trivial frequency are
+     * RAX, RDX, RDI and R10, so keep them in the hot tail and push the rest
+     * into a colder fallback path to reduce work on the dominant case.
+     */
+    if(__builtin_expect(IS_POISONED(RSI), 1))
+    {
+        int hot_other_poisoned =
+            IS_POISONED(RAX) | IS_POISONED(RDX) | IS_POISONED(RDI) | IS_POISONED(R10);
+        FIX_POISONED(RSI, debug_reg_decrypt_rsi);
+        if(__builtin_expect(!hot_other_poisoned, 1))
+        {
+            int cold_other_poisoned =
+                IS_POISONED(RCX) | IS_POISONED(RBX) | IS_POISONED(RBP) |
+                IS_POISONED(R8)  | IS_POISONED(R9)  | IS_POISONED(R11) |
+                IS_POISONED(R12) | IS_POISONED(R13) | IS_POISONED(R14) |
+                IS_POISONED(R15);
+            if(__builtin_expect(!cold_other_poisoned, 1))
+            {
+                METRIC_INC(debug_reg_decrypt_rsi_only_events);
+                return 1;
+            }
+            METRIC_INC(debug_reg_decrypt_rsi_multi_events);
+            if(IS_POISONED(RCX)) FIX_POISONED(RCX, debug_reg_decrypt_rcx);
+            if(IS_POISONED(RBX)) FIX_POISONED(RBX, debug_reg_decrypt_rbx);
+            if(IS_POISONED(RBP)) FIX_POISONED(RBP, debug_reg_decrypt_rbp);
+            if(IS_POISONED(R8)) FIX_POISONED(R8, debug_reg_decrypt_r8);
+            if(IS_POISONED(R9)) FIX_POISONED(R9, debug_reg_decrypt_r9);
+            if(IS_POISONED(R11)) FIX_POISONED(R11, debug_reg_decrypt_r11);
+            if(IS_POISONED(R12)) FIX_POISONED(R12, debug_reg_decrypt_r12);
+            if(IS_POISONED(R13)) FIX_POISONED(R13, debug_reg_decrypt_r13);
+            if(IS_POISONED(R14)) FIX_POISONED(R14, debug_reg_decrypt_r14);
+            if(IS_POISONED(R15)) FIX_POISONED(R15, debug_reg_decrypt_r15);
+            return 1;
+        }
+        METRIC_INC(debug_reg_decrypt_rsi_multi_events);
+        if(IS_POISONED(RAX)) FIX_POISONED(RAX, debug_reg_decrypt_rax);
+        if(IS_POISONED(RDX)) FIX_POISONED(RDX, debug_reg_decrypt_rdx);
+        if(IS_POISONED(RDI)) FIX_POISONED(RDI, debug_reg_decrypt_rdi);
+        if(IS_POISONED(R10)) FIX_POISONED(R10, debug_reg_decrypt_r10);
+        if(__builtin_expect(
+            IS_POISONED(RCX) | IS_POISONED(RBX) | IS_POISONED(RBP) |
+            IS_POISONED(R8)  | IS_POISONED(R9)  | IS_POISONED(R11) |
+            IS_POISONED(R12) | IS_POISONED(R13) | IS_POISONED(R14) |
+            IS_POISONED(R15), 0))
+        {
+            if(IS_POISONED(RCX)) FIX_POISONED(RCX, debug_reg_decrypt_rcx);
+            if(IS_POISONED(RBX)) FIX_POISONED(RBX, debug_reg_decrypt_rbx);
+            if(IS_POISONED(RBP)) FIX_POISONED(RBP, debug_reg_decrypt_rbp);
+            if(IS_POISONED(R8)) FIX_POISONED(R8, debug_reg_decrypt_r8);
+            if(IS_POISONED(R9)) FIX_POISONED(R9, debug_reg_decrypt_r9);
+            if(IS_POISONED(R11)) FIX_POISONED(R11, debug_reg_decrypt_r11);
+            if(IS_POISONED(R12)) FIX_POISONED(R12, debug_reg_decrypt_r12);
+            if(IS_POISONED(R13)) FIX_POISONED(R13, debug_reg_decrypt_r13);
+            if(IS_POISONED(R14)) FIX_POISONED(R14, debug_reg_decrypt_r14);
+            if(IS_POISONED(R15)) FIX_POISONED(R15, debug_reg_decrypt_r15);
+        }
+        return 1;
+    }
+    else
+    {
+        int hot_fixed = 0;
+        int cold_fixed = 0;
+        if(IS_POISONED(RAX)) { FIX_POISONED(RAX, debug_reg_decrypt_rax); hot_fixed++; }
+        if(IS_POISONED(RDX)) { FIX_POISONED(RDX, debug_reg_decrypt_rdx); hot_fixed++; }
+        if(IS_POISONED(RDI)) { FIX_POISONED(RDI, debug_reg_decrypt_rdi); hot_fixed++; }
+        if(IS_POISONED(R10)) { FIX_POISONED(R10, debug_reg_decrypt_r10); hot_fixed++; }
+        if(__builtin_expect(
+            IS_POISONED(RCX) | IS_POISONED(RBX) | IS_POISONED(RBP) |
+            IS_POISONED(R8)  | IS_POISONED(R9)  | IS_POISONED(R11) |
+            IS_POISONED(R12) | IS_POISONED(R13) | IS_POISONED(R14) |
+            IS_POISONED(R15), 0))
+        {
+            if(IS_POISONED(RCX)) { FIX_POISONED(RCX, debug_reg_decrypt_rcx); cold_fixed++; }
+            if(IS_POISONED(RBX)) { FIX_POISONED(RBX, debug_reg_decrypt_rbx); cold_fixed++; }
+            if(IS_POISONED(RBP)) { FIX_POISONED(RBP, debug_reg_decrypt_rbp); cold_fixed++; }
+            if(IS_POISONED(R8)) { FIX_POISONED(R8, debug_reg_decrypt_r8); cold_fixed++; }
+            if(IS_POISONED(R9)) { FIX_POISONED(R9, debug_reg_decrypt_r9); cold_fixed++; }
+            if(IS_POISONED(R11)) { FIX_POISONED(R11, debug_reg_decrypt_r11); cold_fixed++; }
+            if(IS_POISONED(R12)) { FIX_POISONED(R12, debug_reg_decrypt_r12); cold_fixed++; }
+            if(IS_POISONED(R13)) { FIX_POISONED(R13, debug_reg_decrypt_r13); cold_fixed++; }
+            if(IS_POISONED(R14)) { FIX_POISONED(R14, debug_reg_decrypt_r14); cold_fixed++; }
+            if(IS_POISONED(R15)) { FIX_POISONED(R15, debug_reg_decrypt_r15); cold_fixed++; }
+        }
+        if(hot_fixed | cold_fixed)
+        {
+            if(hot_fixed + cold_fixed == 1)
+                METRIC_INC(debug_reg_decrypt_non_rsi_single_events);
+            else
+                METRIC_INC(debug_reg_decrypt_non_rsi_multi_events);
+            return 1;
+        }
+    }
+#undef FIX_POISONED
+#undef IS_POISONED
+    METRIC_INC(debug_unhandled_traps);
+    log_msg("uelf: unhandled debug trap\n");
+    log_word(regs[RIP]);
+    log_word(16);
+    return 1;
+}
+
+#ifndef FREEBSD
+static inline int is_fself_trap_rip(uint64_t rip)
+{
+    return rip == (uint64_t)sceSblAuthMgrSmIsLoadable2
+        || rip == (uint64_t)loadSelfSegment_watchpoint
+        || rip == (uint64_t)loadSelfSegment_epilogue
+        || rip == (uint64_t)decryptSelfBlock_epilogue
+        || rip == (uint64_t)decryptMultipleSelfBlocks_epilogue;
+}
+
+static inline int handle_kernel_trap_fast(uint64_t* regs, uint64_t rip)
+{
+    if(rip == (uint64_t)sceSblServiceMailbox)
+        return try_handle_mailbox_trap(regs);
+    if(rip == (uint64_t)sceSblServiceCryptAsync_deref_singleton)
+    {
+        if(try_handle_fpkg_trap(regs))
+        {
+            METRIC_INC(fpkg_traps);
+            return 1;
+        }
+    }
+    if(is_fself_trap_rip(rip))
+    {
+        if(try_handle_fself_trap(regs))
+        {
+            METRIC_INC(fself_traps);
+            return 1;
+        }
+    }
+    if(rip == (uint64_t)mprotect_fix_start || rip == (uint64_t)aslr_fix_start)
+    {
+        if(try_handle_syscall_fix_trap(regs))
+        {
+            METRIC_INC(syscall_fix_traps);
+            return 1;
+        }
+    }
+    return handle_generic_decrypt_trap(regs);
+}
+#endif
+
 void handle(uint64_t* regs)
 {
     METRIC_INC(handle_entries);
     const int initial_from_user = !!(regs[CS] & 3);
     const int initial_from_copyio = !!(regs[EFLAGS] & 0x40000);
+    const uint64_t rip = regs[RIP];
     if(initial_from_user)
         METRIC_INC(handle_from_userspace_entries);
     const uint64_t syscall_extra = (FWVER >= 0x1000 ? 0x10 : 0);
     if(!initial_from_user)
         regs[EFLAGS] |= 0x10000; //RF
+    if(__builtin_expect(!initial_from_user && !initial_from_copyio, 1)
+    && __builtin_expect(rip != (uint64_t)syscall_before && rip != (uint64_t)doreti_iret, 1))
+    {
+#ifndef FREEBSD
+        handle_kernel_trap_fast(regs, rip);
+#else
+        handle_generic_decrypt_trap(regs);
+#endif
+        return;
+    }
     if(initial_from_user || initial_from_copyio) //from userspace, or from copyin/copyout
     {
 from_userspace:
@@ -202,97 +374,6 @@ from_userspace:
         case TRAP_FPKG: handle_fpkg_trap(regs, TRAP_IDX(lr)); break;
 #endif
         }
-    }
-#ifndef FREEBSD
-    else if(try_handle_mailbox_trap(regs))
-        return;
-    else if(try_handle_fself_trap(regs))
-    {
-        METRIC_INC(fself_traps);
-        return;
-    }
-    else if(try_handle_fpkg_trap(regs))
-    {
-        METRIC_INC(fpkg_traps);
-        return;
-    }
-    else if(try_handle_syscall_fix_trap(regs))
-    {
-        METRIC_INC(syscall_fix_traps);
-        return;
-    }
-#endif
-    else
-    {
-        const uint64_t poisoned_hi = 0xdeb7;
-        const uint64_t restore_hi = 0xffffull << 48;
-#define IS_POISONED(which) ((regs[which] >> 48) == poisoned_hi)
-#define FIX_POISONED(which, field) do { regs[which] |= restore_hi; METRIC_INC(debug_reg_decrypt_events); METRIC_INC(field); } while(0)
-        if(__builtin_expect(IS_POISONED(RSI), 1))
-        {
-            int other_poisoned =
-                IS_POISONED(RAX) | IS_POISONED(RCX) | IS_POISONED(RDX) | IS_POISONED(RBX) |
-                IS_POISONED(RBP) | IS_POISONED(RDI) | IS_POISONED(R8)  | IS_POISONED(R9)  |
-                IS_POISONED(R10) | IS_POISONED(R11) | IS_POISONED(R12) | IS_POISONED(R13) |
-                IS_POISONED(R14) | IS_POISONED(R15);
-            FIX_POISONED(RSI, debug_reg_decrypt_rsi);
-            if(__builtin_expect(!other_poisoned, 1))
-            {
-                METRIC_INC(debug_reg_decrypt_rsi_only_events);
-                return;
-            }
-            METRIC_INC(debug_reg_decrypt_rsi_multi_events);
-            if(IS_POISONED(RAX)) FIX_POISONED(RAX, debug_reg_decrypt_rax);
-            if(IS_POISONED(RCX)) FIX_POISONED(RCX, debug_reg_decrypt_rcx);
-            if(IS_POISONED(RDX)) FIX_POISONED(RDX, debug_reg_decrypt_rdx);
-            if(IS_POISONED(RBX)) FIX_POISONED(RBX, debug_reg_decrypt_rbx);
-            if(IS_POISONED(RBP)) FIX_POISONED(RBP, debug_reg_decrypt_rbp);
-            if(IS_POISONED(RDI)) FIX_POISONED(RDI, debug_reg_decrypt_rdi);
-            if(IS_POISONED(R8)) FIX_POISONED(R8, debug_reg_decrypt_r8);
-            if(IS_POISONED(R9)) FIX_POISONED(R9, debug_reg_decrypt_r9);
-            if(IS_POISONED(R10)) FIX_POISONED(R10, debug_reg_decrypt_r10);
-            if(IS_POISONED(R11)) FIX_POISONED(R11, debug_reg_decrypt_r11);
-            if(IS_POISONED(R12)) FIX_POISONED(R12, debug_reg_decrypt_r12);
-            if(IS_POISONED(R13)) FIX_POISONED(R13, debug_reg_decrypt_r13);
-            if(IS_POISONED(R14)) FIX_POISONED(R14, debug_reg_decrypt_r14);
-            if(IS_POISONED(R15)) FIX_POISONED(R15, debug_reg_decrypt_r15);
-            return;
-        }
-        else
-        {
-            int fixed = 0;
-#define FIX_NON_RSI(which, field) if(IS_POISONED(which)) { FIX_POISONED(which, field); fixed++; }
-            FIX_NON_RSI(RAX, debug_reg_decrypt_rax);
-            FIX_NON_RSI(RCX, debug_reg_decrypt_rcx);
-            FIX_NON_RSI(RDX, debug_reg_decrypt_rdx);
-            FIX_NON_RSI(RBX, debug_reg_decrypt_rbx);
-            FIX_NON_RSI(RBP, debug_reg_decrypt_rbp);
-            FIX_NON_RSI(RDI, debug_reg_decrypt_rdi);
-            FIX_NON_RSI(R8, debug_reg_decrypt_r8);
-            FIX_NON_RSI(R9, debug_reg_decrypt_r9);
-            FIX_NON_RSI(R10, debug_reg_decrypt_r10);
-            FIX_NON_RSI(R11, debug_reg_decrypt_r11);
-            FIX_NON_RSI(R12, debug_reg_decrypt_r12);
-            FIX_NON_RSI(R13, debug_reg_decrypt_r13);
-            FIX_NON_RSI(R14, debug_reg_decrypt_r14);
-            FIX_NON_RSI(R15, debug_reg_decrypt_r15);
-#undef FIX_NON_RSI
-            if(fixed)
-            {
-                if(fixed == 1)
-                    METRIC_INC(debug_reg_decrypt_non_rsi_single_events);
-                else
-                    METRIC_INC(debug_reg_decrypt_non_rsi_multi_events);
-                return;
-            }
-        }
-#undef FIX_POISONED
-#undef IS_POISONED
-        //probably a debug trap that's not yet handled
-        METRIC_INC(debug_unhandled_traps);
-        log_msg("uelf: unhandled debug trap\n");
-        log_word(regs[RIP]);
-        log_word(16);
     }
 }
 
