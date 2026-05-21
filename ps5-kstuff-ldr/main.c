@@ -196,6 +196,11 @@ pt_load(const void* image, void* base, Elf64_Phdr *phdr) {
   }
 }
 
+bool if_exists(const char *path) {
+    struct stat buffer;
+    return stat(path, &buffer) == 0;
+}
+
 bool automount_disabled(void) {
     return if_exists("/data/.kstuff_noautomount");
 }
