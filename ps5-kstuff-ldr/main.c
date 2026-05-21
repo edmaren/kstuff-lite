@@ -22,6 +22,7 @@ along with this program; see the file COPYING. If not, see
 #include <errno.h>
 #include <fcntl.h>
 #include <dirent.h>
+#include <stdbool.h>
 
 #include <sys/mman.h>
 #include <sys/_iovec.h>
@@ -195,6 +196,10 @@ pt_load(const void* image, void* base, Elf64_Phdr *phdr) {
   }
 }
 
+bool automount_disabled(void) {
+    return if_exists("/data/.kstuff_noautomount");
+}
+
 int main(void) {
 	sceKernelSetProcessName("kstuff.elf");
     Elf64_Ehdr *ehdr = (Elf64_Ehdr*)___ps5_kstuff_payload_bin;
@@ -253,6 +258,11 @@ int main(void) {
     if(*args->payloadout == 0) {
         puts("patching app.db");
         *args->payloadout = patch_app_db();
+    }
+
+    if (automount_disabled()) {
+        klog_printf("Automount disabled by /data/.kstuff_noautomount\n");
+        return 0;
     }
 
     klog_printf("Remounting /system_ex and mounting titles...\n");
