@@ -812,12 +812,7 @@ int main(void* ds, int a, int b, uintptr_t c, uintptr_t d)
         // from the 1 fw i checked, everything redacted on kits is also redacted on retails
         // so kit offsets should work on retails, but to be safe, in case this changes in the future
         // only report the offset if from a retail console
-        if (!is_kit) {
-            int64_t syscall_cfi_table_jmp_int3_offset = offsets.syscall_cfi_table_jmp_int3 - kdata_base;
-            char log[128];
-            snprintf(log, sizeof(log), "syscall_cfi_table_jmp_int3 offset missing.\nPlease contribute this offset: %s0x%llx", (offsets.syscall_cfi_table_jmp_int3 > kdata_base) ? "+" : "-", (syscall_cfi_table_jmp_int3_offset > 0) ? syscall_cfi_table_jmp_int3_offset : -syscall_cfi_table_jmp_int3_offset);
-            notify(log);
-        }
+        if (!is_kit) { notify("syscall_cfi_table_jmp_int3 offset missing. Please report your firmware."); }
     }
 #endif
 
@@ -1128,16 +1123,23 @@ int main(void* ds, int a, int b, uintptr_t c, uintptr_t d)
 
     gdb_remote_syscall("write", 3, 0, (uintptr_t)1, (uintptr_t)"done\n", (uintptr_t)5);
 #ifndef DEBUG
-
-    const char *console_type = sceKernelIsDevKit() ? "Devkit" : 
-                               sceKernelIsTestKit() ? "Testkit" : 
-                               "Retail";
-
-    char msg[128];
-    snprintf(msg, sizeof(msg), "Welcome To Kstuff Lite 1.2-dr\nPlayStation 5 FW: %x.%02x (%s)\nBy sleirsgoevy", 
-             fwver >> 8, fwver & 0xFF, console_type);
+    const char *console_type = sceKernelIsDevKit() ? " (Devkit)" :
+                               sceKernelIsTestKit() ? " (Testkit)" :
+                               "";
+    char msg[128]; char *p = msg;
+    const char *h = "Welcome To Kstuff Lite 1.2-dr\nPlayStation 5 FW: ";
+    while (*h) *p++ = *h++;
+    unsigned int fw_maj = (fwver >> 8) & 0xFF;
+    unsigned int fw_min = fwver & 0xFF;
+    if (fw_maj >= 0x10) *p++ = "0123456789abcdef"[fw_maj >> 4];
+    *p++ = "0123456789abcdef"[fw_maj & 0xF];
+    *p++ = '.';
+    *p++ = "0123456789abcdef"[(fw_min >> 4) & 0xF];
+    *p++ = "0123456789abcdef"[fw_min & 0xF];
+    const char *ct = console_type; while (*ct) *p++ = *ct++;
+    const char *f = "\nBy sleirsgoevy"; while (*f) *p++ = *f++;
+    *p = 0;
     notify(msg);
-	
     return 0;
 #endif
     asm volatile("ud2");
