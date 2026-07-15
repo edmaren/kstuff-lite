@@ -46,7 +46,6 @@ along with this program; see the file COPYING. If not, see
 #include "pfsc_mount.h"
 #include "exfat_mount.h"
 #include "mount_helpers.h"
-#include "shellui_patch.h"
 #include "utils.h"
 
 asm(".section .rodata\n"
@@ -56,7 +55,6 @@ asm(".section .rodata\n"
 
 extern char ___ps5_kstuff_payload_bin[];
 
-int patch_app_db(void);
 int sceKernelSetProcessName(const char *name);
 
 #define ROUND_PG(x) (((x) + (PAGE_SIZE - 1)) & ~(PAGE_SIZE - 1))
@@ -371,11 +369,6 @@ int main(void) {
     kernel_setlong(eboot_segments + 0x10, 0xFFFFFFFFFFFFFFFFL); // size
 
     entry(args);
-    if(*args->payloadout == 0) {
-        puts("patching app.db");
-        *args->payloadout = patch_app_db();
-    }
-    start_shellui_patch_thread();
     
     klog_printf("Remounting /system_ex and mounting titles with image support...\n");
     remount_system_ex();
